@@ -1,6 +1,6 @@
+use miniz_oxide::inflate::decompress_to_vec_zlib;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
-
+use std::io::{self, Read, Seek, SeekFrom}; //引入DEFLATE库去解析IDAT
 struct PngInfo {
     width: u32,
     height: u32,
@@ -9,6 +9,7 @@ struct PngInfo {
     compression: u8,
     filter_method: u8,
     interlace: u8,
+    data: Vec<u8>,
 }
 
 fn parse_png(path: &str) -> io::Result<PngInfo> {
@@ -45,7 +46,7 @@ fn parse_png(path: &str) -> io::Result<PngInfo> {
 
     file.seek(SeekFrom::Current(4))?;
 
-    // let mut idat_data: Vec<u8> = Vec::new();
+    let mut idat_data: Vec<u8> = Vec::new();
 
     loop {
         let mut len_buf = [0u8; 4];
@@ -57,12 +58,15 @@ fn parse_png(path: &str) -> io::Result<PngInfo> {
 
         match &type_buf {
             b"IDAT" => {
-                println!("发现 IDAT 块，长度: {}", length);
-                file.seek(SeekFrom::Current(length as i64 + 4))?;
+                // println!("发现 IDAT 块，长度: {}", length);
+                // 稍微高级一点的写法
+                let mut reader = file.by_ref().take(length as u64);
+                reader.read_to_end(&mut idat_data)?;
+                file.seek(SeekFrom::Current(4))?;
             }
             b"IEND" => {
-                println!("发现 IEND 块，解析完毕。");
-                // 读掉最后的 4 字节 CRC 校验，然后跳出循环
+                // println!("发现 IEND 块，解析完毕。");
+
                 file.seek(SeekFrom::Current(4))?;
                 break;
             }
@@ -75,6 +79,8 @@ fn parse_png(path: &str) -> io::Result<PngInfo> {
         }
     }
 
+    let decompressed_data = decompress_to_vec_zlib(&idat_data)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("解压失败: {:?}", e)))?;
     Ok(PngInfo {
         width: u32::from_be_bytes(width_buf),
         height: u32::from_be_bytes(height_buf),
@@ -83,6 +89,7 @@ fn parse_png(path: &str) -> io::Result<PngInfo> {
         compression: other_buf[2],
         filter_method: other_buf[3],
         interlace: other_buf[4],
+        data: decompressed_data,
     })
 }
 
@@ -96,6 +103,7 @@ fn main() {
             println!("压缩方法: {}", info.compression);
             println!("过滤方法: {}", info.filter_method);
             println!("隔行扫描: {}", info.interlace);
+            println!("解压后的原始数据长度: {} 字节", info.data.len());
         }
         Err(e) => eprintln!("错误: {}", e),
     }
