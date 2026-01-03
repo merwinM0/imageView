@@ -1,6 +1,11 @@
+use itertools::Itertools;
 use miniz_oxide::inflate::decompress_to_vec_zlib;
+use rayon::prelude::*;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom}; //引入DEFLATE库去解析IDAT
+use std::io::{self, Read, Seek, SeekFrom, Write}; //引入DEFLATE库去解析IDAT
+use std::os::unix::io::AsRawFd;
+use terminal_size::{Height, Width, terminal_size};
+
 struct PngInfo {
     width: u32,
     height: u32,
@@ -60,7 +65,7 @@ fn parse_png(path: &str) -> io::Result<PngInfo> {
             b"IDAT" => {
                 // println!("发现 IDAT 块，长度: {}", length);
                 // 稍微高级一点的写法
-                let mut reader = file.by_ref().take(length as u64);
+                let mut reader = std::io::Read::by_ref(&mut file).take(length as u64);
                 reader.read_to_end(&mut idat_data)?;
                 file.seek(SeekFrom::Current(4))?;
             }
@@ -99,7 +104,6 @@ fn reconstruct_pixels(info: &PngInfo) -> Vec<u8> {
     let bpp = 4; // Bytes Per Pixel, RGBA 是 4
     let line_size = width * bpp + 1; // 包含行首的 filter byte
 
-    // 最终存放纯像素的容器，大小应该是 width * height * 4
     let mut recon = vec![0u8; width * height * bpp];
     let compressed_data = &info.data;
 
@@ -164,20 +168,84 @@ fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
+fn print_as_sixel(width: u32, height: u32, pixels: &[u8]) {
+    let bpp = 4;
+
+    print!("\x1bPq#0;2;100;100;100");
+
+    let bands: Vec<String> = (0..height)
+        .step_by(6)
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|y_band| {
+            let mut row_output = String::new();
+            let mut sixel_chars = Vec::with_capacity(width as usize);
+
+            for x in 0..width {
+                let mut sixel_byte = 0u8;
+                for bit in 0..6 {
+                    let y = y_band + bit;
+                    if y < height {
+                        let idx = (y as usize * width as usize + x as usize) * bpp;
+                        let brightness =
+                            (pixels[idx] as u32 + pixels[idx + 1] as u32 + pixels[idx + 2] as u32)
+                                / 3;
+                        if brightness > 128 {
+                            sixel_byte |= 1 << bit;
+                        }
+                    }
+                }
+                sixel_chars.push((sixel_byte + 63) as char);
+            }
+
+            row_output.push('#'); // 选择 0 号色
+            row_output.push('0');
+
+            // 使用 itertools 的 group_by 自动寻找连续相同的字符
+            for (ch, group) in &sixel_chars.into_iter().chunk_by(|&c| c) {
+                let count = group.count();
+                if count > 3 {
+                    row_output.push_str(&format!("!{}{}", count, ch));
+                } else {
+                    for _ in 0..count {
+                        row_output.push(ch);
+                    }
+                }
+            }
+            row_output.push('-'); // 换行符
+            row_output
+        })
+        .collect();
+
+    // 4. 按顺序一次性输出
+    for band in bands {
+        print!("{}", band);
+    }
+
+    // 退出 Sixel 模式
+    print!("\x1b\\");
+
+    // io::stdout().flush().unwrap();
+}
+
 fn main() {
     match parse_png("imgs/girl.png") {
         Ok(info) => {
-            println!("PNG 宽度: {}", info.width);
-            println!("PNG 高度: {}", info.height);
-            println!("位深度: {}", info.bit_depth);
-            println!("颜色类型: {}", info.color_type); // 2 是 RGB, 6 是 RGBA
-            println!("压缩方法: {}", info.compression);
-            println!("过滤方法: {}", info.filter_method);
-            println!("隔行扫描: {}", info.interlace);
-            println!("解压后的原始数据长度: {} 字节", info.data.len());
+            // println!("PNG 宽度: {}", info.width);
+            // println!("PNG 高度: {}", info.height);
+            // println!("位深度: {}", info.bit_depth);
+            // println!("颜色类型: {}", info.color_type); // 2 是 RGB, 6 是 RGBA
+            // println!("压缩方法: {}", info.compression);
+            // println!("过滤方法: {}", info.filter_method);
+            // println!("隔行扫描: {}", info.interlace);
+            // println!("解压后的原始数据长度: {} 字节", info.data.len());
 
             let final_pixels = reconstruct_pixels(&info);
-            println!("最终像素数组长度: {}", final_pixels.len());
+            // println!("最终像素数组长度: {}", final_pixels.len());
+
+            print_as_sixel(info.width, info.height, &final_pixels);
+
+            io::stdout().flush().unwrap();
         }
         Err(e) => eprintln!("错误: {}", e),
     }
