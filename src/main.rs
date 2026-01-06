@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use terminal_size::{Width, terminal_size};
 
 fn main() {
-    let img_path = "imgs/girl.png";
+    let img_path = "imgs/girl_2.png";
     let img = match image::open(img_path) {
         Ok(i) => i,
         Err(e) => {
